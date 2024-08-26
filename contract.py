@@ -14,10 +14,7 @@ from algopy import (
     subroutine,
 )
 from contract_mab import calculate_mab_pure
-from utils import (
-    require_payment,
-    get_available_balance,
-)
+from utils import require_payment, get_available_balance, close_offline_on_delete
 
 Bytes32: typing.TypeAlias = arc4.StaticArray[arc4.Byte, typing.Literal[32]]
 Bytes64: typing.TypeAlias = arc4.StaticArray[arc4.Byte, typing.Literal[64]]
@@ -36,6 +33,38 @@ class PartKeyInfo(arc4.Struct):
 class MessagePartKeyInfo(arc4.Struct):
     who: arc4.Address
     partkey: PartKeyInfo
+
+
+##################################################
+# Ownable
+#   allows contract to be owned
+##################################################
+
+
+class OwnableInterface(ARC4Contract):
+    """
+    Interface for all abimethods operated by owner.
+    """
+
+    def __init__(self) -> None:
+        self.owner = Account()
+
+    @arc4.abimethod
+    def transfer(self, new_owner: arc4.Address) -> None:
+        """
+        Transfer ownership of the contract to a new owner.
+        """
+        pass
+
+
+class Ownable(OwnableInterface):
+    def __init__(self) -> None:
+        super().__init__()
+
+    @arc4.abimethod
+    def transfer(self, new_owner: arc4.Address) -> None:
+        assert Txn.sender == self.owner, "must be owner"
+        self.owner = new_owner.native
 
 
 ##################################################
@@ -78,6 +107,13 @@ class FundableInterface(ARC4Contract):
         """
         pass
 
+    @arc4.abimethod(allow_actions=[OnCompleteAction.DeleteApplication])
+    def abort_funding(self) -> None:
+        """
+        Abort funding. Must be called when funding not initialized.
+        """
+        pass
+
 
 class Fundable(FundableInterface):
     def __init__(self) -> None:
@@ -104,37 +140,14 @@ class Fundable(FundableInterface):
         #########################################
         self.funding = funding.native
 
-
-##################################################
-# Ownable
-#   allows contract to be owned
-##################################################
-
-
-class OwnableInterface(ARC4Contract):
-    """
-    Interface for all abimethods operated by owner.
-    """
-
-    def __init__(self) -> None:
-        self.owner = Account()
-
-    @arc4.abimethod
-    def transfer(self, new_owner: arc4.Address) -> None:
-        """
-        Transfer ownership of the contract to a new owner.
-        """
-        pass
-
-
-class Ownable(OwnableInterface):
-    def __init__(self) -> None:
-        super().__init__()
-
-    @arc4.abimethod
-    def transfer(self, new_owner: arc4.Address) -> None:
-        assert Txn.sender == self.owner, "must be owner"
-        self.owner = new_owner.native
+    @arc4.abimethod(allow_actions=[OnCompleteAction.DeleteApplication])
+    def abort_funding(self) -> None:
+        #########################################
+        assert Txn.sender == self.funder, "must be funder"
+        #########################################
+        assert self.funding == UInt64(0)
+        #########################################
+        close_offline_on_delete(self.funder)
 
 
 ##################################################
@@ -459,7 +472,7 @@ class LockableInterface(ARC4Contract):
 #     - lockup_delay, lockup delay
 #     - period_limit, period limit
 ##################################################
-class Lockable(OwnableInterface, LockableInterface, FundableInterface):
+class Lockable(LockableInterface, OwnableInterface, FundableInterface):
     def __init__(self) -> None:
         # ownable state
         self.owner = Account()
@@ -615,30 +628,7 @@ class Lockable(OwnableInterface, LockableInterface, FundableInterface):
             Txn.sender == self.owner or Txn.sender == self.funder
         ), "must be owner or funder"
         ###########################################
-        oca = Txn.on_completion
-        if oca == OnCompleteAction.DeleteApplication:
-            keyreg_txn = itxn.KeyRegistration(
-                non_participation=True,
-                vote_key=Bytes.from_base64(
-                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-                ),
-                selection_key=Bytes.from_base64(
-                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-                ),
-                vote_first=UInt64(0),
-                vote_last=UInt64(0),
-                vote_key_dilution=UInt64(0),
-                state_proof_key=Bytes.from_base64(
-                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
-                ),
-                fee=0,
-            )
-            pmt_txn = itxn.Payment(
-                receiver=self.owner, close_remainder_to=self.owner, fee=0
-            )
-            itxn.submit_txns(keyreg_txn, pmt_txn)
-        else:
-            op.err()
+        close_offline_on_delete(self.owner)
 
     ##############################################
     # function: min_balance (internal)
@@ -788,7 +778,7 @@ class Deployable(DeployableInterface):
 
 
 class Airdrop(
-    Deployable, Stakeable, Upgradeable, Ownable, Lockable, Fundable, Receiver
+    Lockable, Ownable, Fundable, Deployable, Stakeable, Upgradeable, Receiver
 ):
     def __init__(self) -> None:
         # deployable state
@@ -810,7 +800,7 @@ class Airdrop(
         self.lockup_delay = TemplateVar[UInt64]("LOCKUP_DELAY")
         self.vesting_delay = TemplateVar[UInt64]("VESTING_DELAY")
         self.period_limit = TemplateVar[UInt64]("PERIOD_LIMIT")
-        self.distribution_count = TemplateVar[UInt64]("DISTRIBUTION_COUNT") 
+        self.distribution_count = TemplateVar[UInt64]("DISTRIBUTION_COUNT")
         self.distribution_seconds = TemplateVar[UInt64]("DISTRIBUTION_SECONDS")
         # fundable state
         self.funder = Account()
@@ -818,6 +808,19 @@ class Airdrop(
         self.total = UInt64()
         # receiver state
         self.messenger_id = TemplateVar[UInt64]("MESSENGER_ID")
+
+    # override fundable abort_funding abimethod
+    #   close offline on delete to owner
+    @arc4.abimethod(allow_actions=[OnCompleteAction.DeleteApplication])
+    def abort_funding(self) -> None:
+        ##########################################
+        assert (
+            Txn.sender == self.funder or Txn.sender == self.owner
+        ), "must be funder or owner"
+        ##########################################
+        assert self.funding == UInt64(0)
+        ##########################################
+        close_offline_on_delete(self.owner)
 
 
 ##################################################
@@ -932,108 +935,108 @@ class AirdropFactory(BaseFactory):
 ##################################################
 
 
-class VanillaFactory(BaseFactory):
-    """
-    Factory for staking contract without vesting and lockup.
-    """
+# class VanillaFactory(BaseFactory):
+#     """
+#     Factory for staking contract without vesting and lockup.
+#     """
 
-    def __init__(self) -> None:
-        super().__init__()
+#     def __init__(self) -> None:
+#         super().__init__()
 
-    @arc4.abimethod
-    def create(self, delegate: arc4.Address) -> UInt64:
-        ##########################################
-        owner = Txn.sender
-        initial = self.get_initial_payment()
-        ##########################################
-        base_app = arc4.arc4_create(Airdrop).created_app
-        itxn.Payment(
-            receiver=base_app.address,
-            amount=initial + op.Global.min_balance,  # initial + 100000
-            fee=0,
-        ).submit()
-        arc4.abi_call(
-            Airdrop.preconfigure, UInt64(0), Global.latest_timestamp, app_id=base_app
-        )
-        arc4.abi_call(Airdrop.set_delegate, delegate, app_id=base_app)
-        arc4.abi_call(Airdrop.set_total, initial, app_id=base_app)
-        arc4.abi_call(
-            Airdrop.setup,
-            owner,  # owner
-            Global.current_application_address,  # funder
-            initial,
-            app_id=base_app,
-        )
-        arc4.abi_call(Airdrop.set_funding, Global.latest_timestamp, app_id=base_app)
-        # withdraw particpate
-        # close
-        ##########################################
-        return base_app.id
+#     @arc4.abimethod
+#     def create(self, delegate: arc4.Address) -> UInt64:
+#         ##########################################
+#         owner = Txn.sender
+#         initial = self.get_initial_payment()
+#         ##########################################
+#         base_app = arc4.arc4_create(Airdrop).created_app
+#         itxn.Payment(
+#             receiver=base_app.address,
+#             amount=initial + op.Global.min_balance,  # initial + 100000
+#             fee=0,
+#         ).submit()
+#         arc4.abi_call(
+#             Airdrop.preconfigure, UInt64(0), Global.latest_timestamp, app_id=base_app
+#         )
+#         arc4.abi_call(Airdrop.set_delegate, delegate, app_id=base_app)
+#         arc4.abi_call(Airdrop.set_total, initial, app_id=base_app)
+#         arc4.abi_call(
+#             Airdrop.setup,
+#             owner,  # owner
+#             Global.current_application_address,  # funder
+#             initial,
+#             app_id=base_app,
+#         )
+#         arc4.abi_call(Airdrop.set_funding, Global.latest_timestamp, app_id=base_app)
+#         # withdraw particpate
+#         # close
+#         ##########################################
+#         return base_app.id
 
 
 ##################################################
 # StakeRewardFactory
 #   factory for stake reward
 ##################################################
-class StakeRewardFactory(BaseFactory):
-    """
-    Factory for stake reward.
-    """
+# class StakeRewardFactory(BaseFactory):
+#     """
+#     Factory for stake reward.
+#     """
 
-    def __init__(self) -> None:
-        super().__init__()
+#     def __init__(self) -> None:
+#         super().__init__()
 
-    @arc4.abimethod
-    def create(
-        self,
-        owner: arc4.Address,
-        funder: arc4.Address,
-        delegate: arc4.Address,
-        period: arc4.UInt64,
-    ) -> UInt64:
-        """
-        Create stake reward.
+#     @arc4.abimethod
+#     def create(
+#         self,
+#         owner: arc4.Address,
+#         funder: arc4.Address,
+#         delegate: arc4.Address,
+#         period: arc4.UInt64,
+#     ) -> UInt64:
+#         """
+#         Create stake reward.
 
-        Arguments:
-        - owner, who is the beneficiary
-        - funder, who funded the contract
-        - delegate, who is the delegate
-        - period, lockup period
+#         Arguments:
+#         - owner, who is the beneficiary
+#         - funder, who funded the contract
+#         - delegate, who is the delegate
+#         - period, lockup period
 
-        Returns:
-        - app id
-        """
-        ##########################################
-        initial = self.get_initial_payment()
-        ##########################################
-        base_app = arc4.arc4_create(Airdrop).created_app
-        itxn.Payment(
-            receiver=base_app.address, amount=initial + op.Global.min_balance, fee=0
-        ).submit()
-        # common in stake reward
-        #   set delgate and prevent furture changes by owner
-        arc4.abi_call(
-            Airdrop.preconfigure, period, Global.latest_timestamp, app_id=base_app
-        )
-        arc4.abi_call(Airdrop.set_delegate, delegate, app_id=base_app)
-        # common in airdrop
-        #   set owner and funder locking out further changes by creator
-        arc4.abi_call(
-            Airdrop.setup,
-            owner,
-            funder,
-            initial,
-            app_id=base_app,
-        )
-        # funder
-        #   fill
-        #   set funding
-        # vesting, lockup
-        #   withdraw
-        #   participate
-        # close
-        ##########################################
-        return base_app.id
+#         Returns:
+#         - app id
+#         """
+#         ##########################################
+#         initial = self.get_initial_payment()
+#         ##########################################
+#         base_app = arc4.arc4_create(Airdrop).created_app
+#         itxn.Payment(
+#             receiver=base_app.address, amount=initial + op.Global.min_balance, fee=0
+#         ).submit()
+#         # common in stake reward
+#         #   set delgate and prevent furture changes by owner
+#         arc4.abi_call(
+#             Airdrop.preconfigure, period, Global.latest_timestamp, app_id=base_app
+#         )
+#         arc4.abi_call(Airdrop.set_delegate, delegate, app_id=base_app)
+#         # common in airdrop
+#         #   set owner and funder locking out further changes by creator
+#         arc4.abi_call(
+#             Airdrop.setup,
+#             owner,
+#             funder,
+#             initial,
+#             app_id=base_app,
+#         )
+#         # funder
+#         #   fill
+#         #   set funding
+#         # vesting, lockup
+#         #   withdraw
+#         #   participate
+#         # close
+#         ##########################################
+#         return base_app.id
 
 
 ##################################################
@@ -1042,67 +1045,67 @@ class StakeRewardFactory(BaseFactory):
 ##################################################
 
 
-class EarlyStakeRewardFactory(BaseFactory):
-    def __init__(self) -> None:
-        """
-        Factory for early stake reward.
-        """
+# class EarlyStakeRewardFactory(BaseFactory):
+#     def __init__(self) -> None:
+#         """
+#         Factory for early stake reward.
+#         """
 
-    @arc4.abimethod
-    def create(
-        self,
-        owner: arc4.Address,
-        funder: arc4.Address,
-        delegate: arc4.Address,
-        period: arc4.UInt64,
-    ) -> UInt64:
-        """
-        Create early stake reward.
+#     @arc4.abimethod
+#     def create(
+#         self,
+#         owner: arc4.Address,
+#         funder: arc4.Address,
+#         delegate: arc4.Address,
+#         period: arc4.UInt64,
+#     ) -> UInt64:
+#         """
+#         Create early stake reward.
 
-        Arguments:
-        - owner, who is the beneficiary
-        - funder, who funded the contract
-        - delegate, who is the delegate
-        - period, lockup period
+#         Arguments:
+#         - owner, who is the beneficiary
+#         - funder, who funded the contract
+#         - delegate, who is the delegate
+#         - period, lockup period
 
-        Returns:
-        - app id
-        """
-        ##########################################
-        initial = self.get_initial_payment()
-        ##########################################
-        base_app = arc4.arc4_create(Airdrop).created_app
-        itxn.Payment(
-            receiver=base_app.address, amount=initial + op.Global.min_balance, fee=0
-        ).submit()
-        # common in stake reward
-        #   set delgate and prevent furture changes by owner
-        arc4.abi_call(
-            Airdrop.preconfigure, period, Global.latest_timestamp, app_id=base_app
-        )
-        arc4.abi_call(Airdrop.set_delegate, delegate, app_id=base_app)
-        # unique to early staking
-        #   locks initial deposit to be vested
-        arc4.abi_call(Airdrop.set_total, initial, app_id=base_app)
-        # unique to early staking
-        #   variable vesting delay adjustment
-        arc4.abi_call(
-            Airdrop.set_vesting_delay,
-            (period.native + UInt64(1)) * UInt64(2) // UInt64(3),
-            app_id=base_app,
-        )
-        # common in airdrop
-        arc4.abi_call(
-            Airdrop.setup,
-            owner,
-            funder,
-            initial,
-            app_id=base_app,
-        )
-        # funder
-        #   fill, set funding
-        # vesting, lockup
-        #   withdraw, participate
-        # close
-        #########################################
-        return base_app.id
+#         Returns:
+#         - app id
+#         """
+#         ##########################################
+#         initial = self.get_initial_payment()
+#         ##########################################
+#         base_app = arc4.arc4_create(Airdrop).created_app
+#         itxn.Payment(
+#             receiver=base_app.address, amount=initial + op.Global.min_balance, fee=0
+#         ).submit()
+#         # common in stake reward
+#         #   set delgate and prevent furture changes by owner
+#         arc4.abi_call(
+#             Airdrop.preconfigure, period, Global.latest_timestamp, app_id=base_app
+#         )
+#         arc4.abi_call(Airdrop.set_delegate, delegate, app_id=base_app)
+#         # unique to early staking
+#         #   locks initial deposit to be vested
+#         arc4.abi_call(Airdrop.set_total, initial, app_id=base_app)
+#         # unique to early staking
+#         #   variable vesting delay adjustment
+#         arc4.abi_call(
+#             Airdrop.set_vesting_delay,
+#             (period.native + UInt64(1)) * UInt64(2) // UInt64(3),
+#             app_id=base_app,
+#         )
+#         # common in airdrop
+#         arc4.abi_call(
+#             Airdrop.setup,
+#             owner,
+#             funder,
+#             initial,
+#             app_id=base_app,
+#         )
+#         # funder
+#         #   fill, set funding
+#         # vesting, lockup
+#         #   withdraw, participate
+#         # close
+#         #########################################
+#         return base_app.id

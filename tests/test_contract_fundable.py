@@ -63,5 +63,16 @@ def test_fundable_fill(contract: Fundable, context: AlgopyTestContext):
         with context.txn.create_group([extra_payment, deferred_call]):
             deferred_call.submit()
     # contract.total += extra_payment.amount
-
     # TODO test state after abi call
+
+
+# TODO write test
+# when called new funding becomes funding
+def test_fundable_set_funding():
+    pass
+
+
+# TODO write test
+# when called offline key reg and close out to creator address
+def test_fundable_abort_funding():
+    pass
