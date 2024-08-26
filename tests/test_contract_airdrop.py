@@ -39,6 +39,8 @@ def contract(context: AlgopyTestContext) -> Airdrop:  # noqa: ARG001
     context.set_template_var("VESTING_DELAY", 12)
     context.set_template_var("PERIOD_LIMIT", 5)
     context.set_template_var("MESSENGER_ID", 1)
+    context.set_template_var("DISTRIBUTION_COUNT", 12)
+    context.set_template_var("DISTRIBUTION_SECONDS", 60)
     return Airdrop()
 
 
@@ -62,3 +64,12 @@ def test_airdrop(contract: Airdrop):
     assert contract.parent_id == 0
     assert contract.stakeable == 1
     assert contract.updatable == 1
+
+
+# TODO write test
+# when called offline key reg and close out to creator address
+def test_fundable_abort_funding():
+    # see lockable close
+    #   can be called by owner or funder before funding
+    #   close offline to owner
+    pass

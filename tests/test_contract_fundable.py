@@ -75,4 +75,6 @@ def test_fundable_set_funding():
 # TODO write test
 # when called offline key reg and close out to creator address
 def test_fundable_abort_funding():
+    # see lockable close
+    #   close offline to funder
     pass

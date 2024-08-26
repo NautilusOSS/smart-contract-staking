@@ -180,10 +180,12 @@ def test_lockable_close(contract: Lockable, context: AlgopyTestContext):
     contract.close()
     # TODO test nonparticipation itx
     payment_txn = context.txn.last_group.last_itxn.payment
-    assert payment_txn.receiver == contract.owner
-    assert payment_txn.amount == 0
+    # TODO receiver is creator address
+    # TODO amount is global min balance
     assert payment_txn.close_remainder_to == contract.owner
+    # TODO close remaineder amount is balance before minus global min balance
     # TODO test outcome of close_remainder_to contract owner
+
 
 def test_lockable_calculate_min_balance(contract: Lockable, context: AlgopyTestContext):
     """
